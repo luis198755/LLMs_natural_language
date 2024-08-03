@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -25,13 +26,13 @@ func main() {
 	}
 
 	// Initialize OpenAI client
-	openai.APIKey = os.Getenv("OPEN_AI_API_KEY")
+	client := openai.NewClient(os.Getenv("OPEN_AI_API_KEY"))
 
 	// Initialize Gin router
 	router := gin.Default()
 
 	// Define the /human_query endpoint
-	router.POST("/human_query", handleHumanQuery)
+	router.POST("/human_query", handleHumanQuery(client))
 
 	// Start the server
 	port := os.Getenv("PORT")
@@ -42,7 +43,7 @@ func main() {
 }
 
 func loadEnv() error {
-	return nil // Replace with your .env loading logic
+	return godotenv.Load()
 }
 
 func getSchema() DatabaseSchema {
@@ -55,7 +56,7 @@ func query(sqlQuery string) ([]map[string]interface{}, error) {
 	return nil, nil // Replace with your actual database query logic
 }
 
-func humanQueryToSQL(humanQuery string) (string, error) {
+func humanQueryToSQL(client *openai.Client, humanQuery string) (string, error) {
 	databaseSchema := getSchema()
 	schemaJSON, err := json.Marshal(databaseSchema)
 	if err != nil {
@@ -75,7 +76,6 @@ func humanQueryToSQL(humanQuery string) (string, error) {
     </schema>
     `, string(schemaJSON))
 
-	client := openai.NewClient(openai.APIKey)
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
@@ -90,7 +90,9 @@ func humanQueryToSQL(humanQuery string) (string, error) {
 					Content: humanQuery,
 				},
 			},
-			ResponseFormat: openai.ChatCompletionResponseFormatJSONObject,
+			ResponseFormat: &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+			},
 		},
 	)
 	if err != nil {
@@ -100,7 +102,7 @@ func humanQueryToSQL(humanQuery string) (string, error) {
 	return resp.Choices[0].Message.Content, nil
 }
 
-func buildAnswer(result []map[string]interface{}, humanQuery string) (string, error) {
+func buildAnswer(client *openai.Client, result []map[string]interface{}, humanQuery string) (string, error) {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("error marshaling result: %w", err)
@@ -117,7 +119,6 @@ func buildAnswer(result []map[string]interface{}, humanQuery string) (string, er
     </sql_response>
     `, humanQuery, string(resultJSON))
 
-	client := openai.NewClient(openai.APIKey)
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
@@ -145,37 +146,39 @@ type PostHumanQueryResponse struct {
 	Answer string `json:"answer"`
 }
 
-func handleHumanQuery(c *gin.Context) {
-	var payload PostHumanQueryPayload
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
-		return
-	}
+func handleHumanQuery(client *openai.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var payload PostHumanQueryPayload
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+			return
+		}
 
-	sqlQuery, err := humanQueryToSQL(payload.HumanQuery)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate SQL query"})
-		return
-	}
+		sqlQuery, err := humanQueryToSQL(client, payload.HumanQuery)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate SQL query"})
+			return
+		}
 
-	var resultDict map[string]interface{}
-	err = json.Unmarshal([]byte(sqlQuery), &resultDict)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse SQL query"})
-		return
-	}
+		var resultDict map[string]interface{}
+		err = json.Unmarshal([]byte(sqlQuery), &resultDict)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse SQL query"})
+			return
+		}
 
-	result, err := query(resultDict["sql_query"].(string))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query database"})
-		return
-	}
+		result, err := query(resultDict["sql_query"].(string))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query database"})
+			return
+		}
 
-	answer, err := buildAnswer(result, payload.HumanQuery)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate answer"})
-		return
-	}
+		answer, err := buildAnswer(client, result, payload.HumanQuery)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate answer"})
+			return
+		}
 
-	c.JSON(http.StatusOK, PostHumanQueryResponse{Answer: answer})
+		c.JSON(http.StatusOK, PostHumanQueryResponse{Answer: answer})
+	}
 }
